@@ -1,14 +1,30 @@
 const instruments = {
 	sin: 0,
 	square: 1,
-	triangle: 2
+	triangle: 2,
+	saw: 3,
+	reverseSaw: 4
 };
 
-class WcSynthPlayer extends HTMLElement {
+const keyToNote = {
+	"KeyA": "A",
+	"KeyS": "A#",
+	"KeyD": "B",
+	"KeyF": "C",
+	"KeyG": "C#",
+	"KeyH": "D",
+	"KeyJ": "D#",
+	"KeyK": "E",
+	"KeyL": "F",
+	"Semicolon": "F#",
+	"Quote": "G",
+	"Slash": "G#"
+};
+
+class WcSynth extends HTMLElement {
 	static observedAttributes = [];
 	#isReady;
-	#isPlaying;
-	#instrument = 0;
+	#playingNotes = [];
 	constructor() {
 		super();
 		this.bind(this);
@@ -48,7 +64,8 @@ class WcSynthPlayer extends HTMLElement {
 	cacheDom() {
 		this.dom = {
 			note: this.shadowRoot.querySelector("#note"),
-			instrument: this.shadowRoot.querySelector("#instrument")
+			instrument: this.shadowRoot.querySelector("#instrument"),
+			frequencyBase: this.shadowRoot.querySelector("#frequency-base")
 		};
 	}
 	attachEvents() {
@@ -56,59 +73,12 @@ class WcSynthPlayer extends HTMLElement {
 		document.addEventListener("keyup", this.onKeyup);
 	}
 	async onKeydown(e){
+		if(e.repeat) return;
 		if (!this.#isReady) {
 			await this.setupAudio();
 			this.#isReady = true;
 		}
 		switch(e.code){
-			case "KeyA":
-				this.play(220);
-				this.dom.note.textContent = "A";
-				break;
-			case "KeyS":
-				this.play(233); //A#
-				this.dom.note.textContent = "A#";
-				break;
-			case "KeyD":
-				this.play(247); //B
-				this.dom.note.textContent = "B";
-				break;
-			case "KeyF":
-				this.play(261); //C
-				this.dom.note.textContent = "C";
-				break;
-			case "KeyG":
-				this.play(277); //C#
-				this.dom.note.textContent = "C#";
-				break;
-			case "KeyH":
-				this.play(293); //D
-				this.dom.note.textContent = "D";
-				break;
-			case "KeyJ":
-				this.play(311); //D#
-				this.dom.note.textContent = "D#";
-				break;
-			case "KeyK":
-				this.play(329); //E
-				this.dom.note.textContent = "E";
-				break;
-			case "KeyL":
-				this.play(349); //F
-				this.dom.note.textContent = "E#";
-				break;
-			case "Semicolon":
-				this.play(370); //F#
-				this.dom.note.textContent = "F#";
-				break;
-			case "Quote":
-				this.play(392); //G
-				this.dom.note.textContent = "G";
-				break;
-			case "Slash":
-				this.play(415); //G#
-				this.dom.note.textContent = "G#";
-				break;
 			case "Digit1":
 				this.changeInstrument("sin");
 				break;
@@ -118,32 +88,56 @@ class WcSynthPlayer extends HTMLElement {
 			case "Digit3":
 				this.changeInstrument("triangle");
 				break;
+			case "Digit4":
+				this.changeInstrument("saw");
+				break;
+			case "Digit5":
+				this.changeInstrument("reverseSaw");
+				break;
+			case "ArrowLeft":
+				this.shiftBaseFrequency(-12);
+				break;
+			case "ArrowRight":
+				this.shiftBaseFrequency(12);
+				break;
 			default:
-				console.log(e.code);
+				if(keyToNote[e.code]){
+					this.play(keyToNote[e.code]);
+				} else {
+					console.log(e.code);
+				}
+		}
+	}
+	onKeyup(e) {
+		if (keyToNote[e.code]) {
+			this.stop(keyToNote[e.code]);
 		}
 	}
 	changeInstrument(name){
-		this.#instrument = instruments[name];
-		this.toneNode.parameters.get("type").value = this.#instrument;
+		const instrument = instruments[name];
+		this.toneNode.port.postMessage({ type: "changeInstrument", instrument: instrument });
 		this.dom.instrument.textContent = `Instrument: ${name}`;
 	}
-	onKeyup(e){
-		this.stop();
+	shiftBaseFrequency(semitoneCount){
+		this.toneNode.port.postMessage({ type: "shiftBaseFrequency", semitoneCount });
 	}
-	async play(frequency) {
-		this.#isPlaying = true;
-		this.toneNode.parameters.get("frequency").value = frequency;
+	async play(note) {
+		this.#playingNotes.push(note);
+		this.#playingNotes.sort();
+		this.dom.note.textContent = `Note: ${this.#playingNotes.join(", ")}`;
+		this.toneNode.port.postMessage({ type: "playNotes", notes: this.#playingNotes });
 		this.toneNode.connect(this.context.destination);
 	}
-	async stop() {
-		if(this.#isPlaying){
+	async stop(note) {
+		this.#playingNotes = this.#playingNotes.filter(n => n != note);
+		this.toneNode.port.postMessage({ type: "playNotes", notes: this.#playingNotes });
+		if(this.#playingNotes.length === 0){
 			this.toneNode.disconnect(this.context.destination);
 		}
-		this.#isPlaying = false;
 	}
 	attributeChangedCallback(name, oldValue, newValue) {
 		this[name] = newValue;
 	}
 }
 
-customElements.define("synth-player", WcSynthPlayer);
+customElements.define("wc-synth", WcSynth);
