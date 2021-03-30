@@ -1,3 +1,5 @@
+import "./wc-svg-line-graph.js";
+
 const instruments = {
 	sin: 0,
 	square: 1,
@@ -24,7 +26,6 @@ const keyToNote = {
 class WcSynth extends HTMLElement {
 	static observedAttributes = [];
 	#isReady;
-	#playingNotes = [];
 	constructor() {
 		super();
 		this.bind(this);
@@ -39,6 +40,7 @@ class WcSynth extends HTMLElement {
 		element.play = element.play.bind(element);
 		element.stop = element.stop.bind(element);
 		element.changeInstrument = element.changeInstrument.bind(element);
+		element.onAudioMessage = element.onAudioMessage.bind(element);
 	}
 	render() {
 		this.attachShadow({ mode: "open" });
@@ -46,6 +48,7 @@ class WcSynth extends HTMLElement {
 				<div>Use the keyboard to play</div>
 				<div id="note"></div>
 				<div id="instrument"></div>
+				<div id="debug"></div>
 			`;
 	}
 	async setupAudio() {
@@ -53,7 +56,7 @@ class WcSynth extends HTMLElement {
 		await this.context.audioWorklet.addModule("./js/worklet/tone-processor.js");
 
 		this.toneNode = new AudioWorkletNode(this.context, "tone-processor");
-		this.toneNode.parameters.get("sampleRate").value = this.context.sampleRate;
+		this.toneNode.port.onmessage = this.onAudioMessage;
 	}
 	async connectedCallback() {
 		this.render();
@@ -65,12 +68,37 @@ class WcSynth extends HTMLElement {
 		this.dom = {
 			note: this.shadowRoot.querySelector("#note"),
 			instrument: this.shadowRoot.querySelector("#instrument"),
-			frequencyBase: this.shadowRoot.querySelector("#frequency-base")
+			frequencyBase: this.shadowRoot.querySelector("#frequency-base"),
+			debug: this.shadowRoot.querySelector("#debug")
 		};
 	}
 	attachEvents() {
 		document.addEventListener("keydown", this.onKeydown);
 		document.addEventListener("keyup", this.onKeyup);
+	}
+	async onAudioMessage(e){
+		switch(e.data.type){
+			case "silence": {
+				this.toneNode.disconnect(this.context.destination);
+				break;
+			}
+			case "debugInfo": {
+				const svgGraph = document.createElement("wc-svg-line-graph");
+				svgGraph.width = 1280;
+				svgGraph.height = 720;
+				svgGraph.ymax = 1;
+				svgGraph.ymin = -1;
+				svgGraph.xmin = 0;
+				const frameLimit = Math.floor(e.data.data.length / 720);
+				console.log(frameLimit)
+				const transformedData = e.data.data.filter((x, i) => (i % frameLimit) === 0).map((x, i) => [i, x]);
+
+				svgGraph.xmax = transformedData.length;
+				svgGraph.points = transformedData;
+				this.dom.debug.innerHTML = "";
+				this.dom.debug.appendChild(svgGraph);
+			}
+		}
 	}
 	async onKeydown(e){
 		if(e.repeat) return;
@@ -122,18 +150,15 @@ class WcSynth extends HTMLElement {
 		this.toneNode.port.postMessage({ type: "shiftBaseFrequency", semitoneCount });
 	}
 	async play(note) {
-		this.#playingNotes.push(note);
-		this.#playingNotes.sort();
-		this.dom.note.textContent = `Note: ${this.#playingNotes.join(", ")}`;
-		this.toneNode.port.postMessage({ type: "playNotes", notes: this.#playingNotes });
 		this.toneNode.connect(this.context.destination);
+		//this.toneNode.port.postMessage({ type: "startDebugCapture" });
+		this.toneNode.port.postMessage({ type: "noteDown", note });
 	}
 	async stop(note) {
-		this.#playingNotes = this.#playingNotes.filter(n => n != note);
-		this.toneNode.port.postMessage({ type: "playNotes", notes: this.#playingNotes });
-		if(this.#playingNotes.length === 0){
-			this.toneNode.disconnect(this.context.destination);
-		}
+		//setTimeout(() => {
+		//  this.toneNode.port.postMessage({ type: "endDebugCapture" });
+		//}, 1000);
+		this.toneNode.port.postMessage({ type: "noteUp", note });
 	}
 	attributeChangedCallback(name, oldValue, newValue) {
 		this[name] = newValue;

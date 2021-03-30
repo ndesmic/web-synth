@@ -20,46 +20,74 @@ const noteIndex = {
 };
 
 class ToneProcessor extends AudioWorkletProcessor {
-	static parameterDescriptors = [
-		{
-			name: "sampleRate",
-			defaultValue: 48000
-		},
-		{
-			name: "type",
-			defaultValue: 0
-		}
-	];
 	#index = 0;
 	#playingNotes = [];
+	#debug = false;
+	#debugFrames = [];
+	#isSilent = true;
 	#baseFrequency = 440;
 	#instrument = 0;
-	constructor(){
+	constructor() {
 		super();
 		this.bind(this);
 		this.port.onmessage = this.onMessage;
 	}
-	bind(processor){
+	bind(processor) {
 		processor.onMessage = processor.onMessage.bind(processor);
 	}
-	onMessage(e){
-		switch(e.data.type){
-			case "playNotes":
-				this.#playingNotes = e.data.notes;
+	onMessage(e) {
+		switch (e.data.type) {
+			case "noteDown": {
+				const note = this.#playingNotes.find(n => n.note === e.data.note);
+				if (!note) {
+					this.#playingNotes.push({
+						note: e.data.note,
+						downTime: (this.#index / globalThis.sampleRate) * 1000
+					});
+				} else {
+					note.downTime = (this.#index / globalThis.sampleRate) * 1000,
+					note.upTime = null;
+				}
+				this.#isSilent = false;
 				break;
-			case "shiftBaseFrequency":
+			}
+			case "noteUp": {
+				const note = this.#playingNotes.find(n => n.note === e.data.note);
+				if (note) {
+					note.upTime = (this.#index / globalThis.sampleRate) * 1000;
+				}
+				break;
+			}
+			case "shiftBaseFrequency": {
 				this.#baseFrequency = this.#baseFrequency * frequencyPowerBase ** e.data.semitoneCount;
-			case "changeInstrument":
+				break;
+			}
+			case "changeInstrument": {
 				this.#instrument = e.data.instrument;
+				break;
+			}
+			case "startDebugCapture": {
+				this.#debugFrames = [];
+				this.#debug = true;
+				console.log("Capturing debug data.");
+				break;
+			}
+			case "endDebugCapture": {
+				this.#debug = false;
+				this.port.postMessage({ type: "debugInfo", data: this.#debugFrames });
+				console.log("Ending debug data.");
+				break;
+			}
 			default:
-				throw new Error(`Unknown message send to tone-processor: ${e.data.type}`);
+				throw new Error(`Unknown message sent to tone-processor: ${e.data.type}`);
 		}
 	}
-	process(inputs, outputs, parameters){
+	process(inputs, outputs, parameters) {
+		if (this.#isSilent) return true;
 		const output = outputs[0];
 
 		let generatorFunction;
-		switch(this.#instrument){
+		switch (this.#instrument) {
 			case 1:
 				generatorFunction = getSquareWave;
 				break;
@@ -77,12 +105,45 @@ class ToneProcessor extends AudioWorkletProcessor {
 		}
 
 		output.forEach(channel => {
-			for(let i = 0; i < channel.length; i++){
+			const notesToRemove = [];
 
-				const frequencies = this.#playingNotes.map(n => this.#baseFrequency * frequencyPowerBase ** noteIndex[n]);
-				const outValue = frequencies.reduce((value, frequency) => value + generatorFunction(frequency, this.#index / parameters.sampleRate[0]), 0);
-				channel[i] = outValue;
+			for (let i = 0; i < channel.length; i++) {
+				const time = this.#index / globalThis.sampleRate;
+				const timeMs = time * 1000;
+
+				let value = 0;
+				for (const note of this.#playingNotes) {
+					const amplitude = envelope({
+						attackMs: 100,
+						attackAmplitude: 1,
+						decayMs: 10,
+						sustainAmplitide: 0.8,
+						releaseMs: 100,
+						maxMs: null
+					})(note.downTime, note.upTime, timeMs);
+
+					const frequency = this.#baseFrequency * frequencyPowerBase ** noteIndex[note.note];
+
+					if (amplitude === 0 && note.upTime) {
+						notesToRemove.push(note.note);
+					}
+
+					value += generatorFunction(frequency, time, amplitude);
+				}
+
+				channel[i] = value;
+				if (this.#debug) {
+					this.#debugFrames.push(value);
+				}
 				this.#index++;
+			}
+
+			this.#playingNotes = this.#playingNotes.filter(n => !notesToRemove.includes(n.note));
+
+			if (this.#playingNotes.length === 0) {
+				this.#isSilent = true;
+				this.port.postMessage({ type: "silence" });
+				console.log("Silent")
 			}
 		});
 
@@ -91,6 +152,39 @@ class ToneProcessor extends AudioWorkletProcessor {
 }
 
 registerProcessor("tone-processor", ToneProcessor);
+
+const envelope = ({ attackMs, attackAmplitude, decayMs, sustainAmplitide, releaseMs, maxMs }) =>
+	(downTime, upTime, time) => {
+		let amplitude = 0;
+		if (time >= downTime) {
+			const envelopeTime = time - downTime;
+
+			if (!upTime) {
+				if (envelopeTime <= attackMs) {
+					amplitude = attackAmplitude * (envelopeTime / attackMs)
+				} else if (envelopeTime < (decayMs + attackMs)) {
+					amplitude = attackAmplitude + ((sustainAmplitide - attackAmplitude) * ((envelopeTime - attackMs) / decayMs));
+				} else {
+					amplitude = sustainAmplitide;
+				}
+			} else {
+				const timeSinceRelease = time - upTime;
+				if (timeSinceRelease < releaseMs) {
+					amplitude = sustainAmplitide + ((0 - sustainAmplitide) * (timeSinceRelease / releaseMs));
+				} else {
+					amplitude = 0;
+				}
+			}
+
+			if (maxMs && envelopeTime > maxMs) {
+				amplitude = 0;
+			}
+		}
+		if (amplitude < 0.001) {
+			amplitude = 0;
+		}
+		return amplitude;
+	};
 
 function getSinWave(frequency, time, amplitude = 1) {
 	return amplitude * Math.sin(frequency * 2 * Math.PI * time);
@@ -107,8 +201,8 @@ function getTriangleWave(frequency, time, amplitude = 1) {
 	return (2 * amplitude / Math.PI) * Math.asin(Math.sin(frequency * 2 * Math.PI * time));
 }
 
-function getSawWave(frequency, time, amplitude = 1){
-	return (4 * amplitude / Math.PI) * (frequency * Math.PI * (time % (1 / frequency))) - (2 / Math.PI  * amplitude);
+function getSawWave(frequency, time, amplitude = 1) {
+	return (4 * amplitude / Math.PI) * (frequency * Math.PI * (time % (1 / frequency))) - (2 / Math.PI * amplitude);
 }
 
 function getRSawWave(frequency, time, amplitude = 1) {
